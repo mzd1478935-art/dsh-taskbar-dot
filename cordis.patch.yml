@@ -1,0 +1,4 @@
+# Bundle layer for dsh-taskbar-dot: the host half lives beside this file.
+- insert:
+    - id: taskbar-dot
+      name: ./index.js

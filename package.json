@@ -1,0 +1,41 @@
+{
+  "name": "dsh-taskbar-dot",
+  "version": "0.1.0",
+  "description": "Windows 任务栏完成蓝点：回合跑完且窗口在后台时，在 DSH 图标右上角点一个小蓝点（系统 overlay 绘制，无常驻进程，0 token）。",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "TaskbarDot.exe",
+    "TaskbarDot.cs",
+    "scripts/build.ps1",
+    "README.md",
+    "LICENSE"
+  ],
+  "os": [
+    "win32"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "taskbar",
+    "badge",
+    "windows",
+    "notification"
+  ],
+  "license": "MIT"
+}
