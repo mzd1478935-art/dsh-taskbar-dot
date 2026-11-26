@@ -9,11 +9,16 @@ using System.Threading;
 
 internal static class TaskbarDot
 {
-    // 9.5 KB helper. No UI, no polling of DSH, no UI Automation: it finds the
-    // DSH window by title, paints one overlay icon, then waits for the user to
-    // come back and clears it. It only lives while the dot is up.
+    // ~10 KB helper. No UI, no polling of DSH: it finds the DSH window by
+    // title, optionally plays a short synthesized tone, paints one overlay
+    // icon, then waits for the user to come back and clears it.
 
     private static string Title = "DeepSeek Harness";
+    private static readonly int[] DotSizes = { 6, 7, 8, 9, 10 };
+    private static int SizeLevel = 3;          // 1..5, 3 = 8px (the original dot)
+    private static string SoundPreset = "";    // "" | tick | blip | chime | pop | soft
+    private static string SoundOnly = "";
+    private static byte[] KeepWav;   // PlaySound(SND_MEMORY) 播放期间缓冲必须存活
 
     [ComImport, Guid("56FDF344-FD6D-11d0-958A-006097C9A090")]
     private class TaskbarList { }
@@ -44,12 +49,17 @@ internal static class TaskbarDot
 
     [DllImport("user32.dll")] private static extern bool EnumWindows(EnumProc cb, IntPtr p);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowTextW(IntPtr h, StringBuilder s, int n);
-    [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
     [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr h, out RECT r);
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
     [DllImport("ole32.dll")] private static extern int CoCreateInstance(ref Guid clsid, IntPtr outer, uint ctx, ref Guid iid, out IntPtr instance);
+    [DllImport("winmm.dll", CharSet = CharSet.Unicode)]
+    private static extern bool PlaySound(byte[] data, IntPtr module, uint flags);
     private delegate bool EnumProc(IntPtr h, IntPtr p);
     [StructLayout(LayoutKind.Sequential)] private struct RECT { public int L, T, R, B; }
+
+    private const uint SND_ASYNC = 0x0001;
+    private const uint SND_NODEFAULT = 0x0002;
+    private const uint SND_MEMORY = 0x0004;
 
     private static string LogPath()
     {
@@ -91,8 +101,7 @@ internal static class TaskbarDot
 
     private static IntPtr DotIcon()
     {
-        // 24x24 canvas with an 8px disc: the shell draws this as the overlay
-        // badge, so the visible dot ends up small and sits on the icon corner.
+        int diameter = DotSizes[Math.Max(0, Math.Min(DotSizes.Length - 1, SizeLevel - 1))];
         using (var bmp = new Bitmap(24, 24))
         {
             using (var g = Graphics.FromImage(bmp))
@@ -101,7 +110,8 @@ internal static class TaskbarDot
                 g.SmoothingMode = SmoothingMode.AntiAlias;
                 using (var brush = new SolidBrush(Color.FromArgb(255, 77, 107, 254)))
                 {
-                    g.FillEllipse(brush, 8f, 8f, 8f, 8f);
+                    float offset = (24f - diameter) / 2f;
+                    g.FillEllipse(brush, offset, offset, diameter, diameter);
                 }
             }
             return bmp.GetHicon();
@@ -128,6 +138,82 @@ internal static class TaskbarDot
         return hr == 0;
     }
 
+    /* ---- short synthesized notification tones (no audio files shipped) ---- */
+
+    private sealed class Tone { public double Freq; public int Ms; public double Gain; public double Decay; public int AtMs; }
+
+    private static Tone[] Preset(string name)
+    {
+        switch (name)
+        {
+            case "tick": return new[] { new Tone { Freq = 1600, Ms = 45, Gain = 0.35, Decay = 6, AtMs = 0 } };
+            case "blip": return new[] { new Tone { Freq = 1000, Ms = 60, Gain = 0.5, Decay = 4, AtMs = 0 } };
+            case "pop": return new[] { new Tone { Freq = 720, Ms = 55, Gain = 0.55, Decay = 8, AtMs = 0 } };
+            case "soft": return new[] { new Tone { Freq = 620, Ms = 130, Gain = 0.3, Decay = 2.4, AtMs = 0 } };
+            case "chime":
+            default:
+                return new[]
+                {
+                    new Tone { Freq = 880, Ms = 90, Gain = 0.38, Decay = 3, AtMs = 0 },
+                    new Tone { Freq = 1320, Ms = 110, Gain = 0.32, Decay = 3, AtMs = 70 }
+                };
+        }
+    }
+
+    private static byte[] BuildWav(string preset)
+    {
+        const int rate = 22050;
+        Tone[] tones = Preset(preset);
+        int totalMs = 0;
+        foreach (var t in tones) totalMs = Math.Max(totalMs, t.AtMs + t.Ms);
+        int samples = (int)(rate * (totalMs + 20) / 1000.0);
+        var data = new short[samples];
+        foreach (var t in tones)
+        {
+            int start = (int)(rate * t.AtMs / 1000.0);
+            int count = (int)(rate * t.Ms / 1000.0);
+            for (int i = 0; i < count && start + i < samples; i++)
+            {
+                double x = (double)i / count;
+                double env = Math.Pow(1 - x, t.Decay) * t.Gain;
+                double v = Math.Sin(2 * Math.PI * t.Freq * i / rate) * env;
+                data[start + i] += (short)(v * 32767 * 0.55);
+            }
+        }
+        using (var ms = new MemoryStream())
+        using (var bw = new BinaryWriter(ms))
+        {
+            int byteCount = samples * 2;
+            bw.Write(Encoding.ASCII.GetBytes("RIFF"));
+            bw.Write(36 + byteCount);
+            bw.Write(Encoding.ASCII.GetBytes("WAVEfmt "));
+            bw.Write(16);
+            bw.Write((short)1);
+            bw.Write((short)1);
+            bw.Write(rate);
+            bw.Write(rate * 2);
+            bw.Write((short)2);
+            bw.Write((short)16);
+            bw.Write(Encoding.ASCII.GetBytes("data"));
+            bw.Write(byteCount);
+            foreach (short s in data) bw.Write(s);
+            bw.Flush();
+            return ms.ToArray();
+        }
+    }
+
+    private static void Play(string preset)
+    {
+        if (string.IsNullOrWhiteSpace(preset) || preset == "off") return;
+        try
+        {
+            byte[] wav = BuildWav(preset);
+            KeepWav = wav;
+            PlaySound(wav, IntPtr.Zero, SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
+        }
+        catch (Exception e) { Log("sound failed: " + e.Message); }
+    }
+
     [STAThread]
     private static int Main(string[] args)
     {
@@ -138,7 +224,24 @@ internal static class TaskbarDot
             if (string.Equals(arg, "clear", StringComparison.OrdinalIgnoreCase)) clear = true;
             else if (string.Equals(arg, "hold", StringComparison.OrdinalIgnoreCase)) hold = true;
             else if (arg.StartsWith("title=", StringComparison.OrdinalIgnoreCase)) Title = arg.Substring(6);
+            else if (arg.StartsWith("size=", StringComparison.OrdinalIgnoreCase))
+            {
+                int level;
+                if (int.TryParse(arg.Substring(5), out level)) SizeLevel = Math.Max(1, Math.Min(5, level));
+            }
+            else if (arg.StartsWith("soundonly=", StringComparison.OrdinalIgnoreCase)) SoundOnly = arg.Substring(10);
+            else if (arg.StartsWith("sound=", StringComparison.OrdinalIgnoreCase)) SoundPreset = arg.Substring(6);
         }
+
+        if (!string.IsNullOrEmpty(SoundOnly))
+        {
+            Play(SoundOnly);
+            Thread.Sleep(350);
+            Log("sound-only " + SoundOnly);
+            return 0;
+        }
+
+        if (!string.IsNullOrEmpty(SoundPreset)) Play(SoundPreset);
 
         IntPtr hwnd = FindDshWindow();
         if (hwnd == IntPtr.Zero) { Log("no DSH window"); return 2; }
@@ -154,10 +257,10 @@ internal static class TaskbarDot
             return hr == 0 ? 0 : 1;
         }
 
-        // Already looking at DSH? The answer is on screen; a dot adds nothing.
         if (!hold && GetForegroundWindow() == hwnd)
         {
-            Log("skip (foreground at completion)");
+            Thread.Sleep(260); // 让异步提示音播完再退出
+            Log("skip (foreground at completion) size=" + SizeLevel + " sound=" + SoundPreset);
             return 0;
         }
 
@@ -167,11 +270,9 @@ internal static class TaskbarDot
             ok = Apply(taskbar, hwnd, true, out hr);
             if (!ok) Thread.Sleep(300);
         }
-        Log("show hwnd=" + hwnd + " ok=" + ok + " hr=" + hr);
+        Log("show hwnd=" + hwnd + " ok=" + ok + " hr=" + hr + " size=" + SizeLevel + " sound=" + SoundPreset);
         if (!ok) return 1;
 
-        // Stay alive only while the dot is up: the moment DSH comes to the
-        // foreground the turn has been seen, so clear and exit.
         DateTime deadline = DateTime.UtcNow.AddMinutes(hold ? 60 : 30);
         while (DateTime.UtcNow < deadline)
         {
@@ -181,7 +282,7 @@ internal static class TaskbarDot
             if (!GetWindowRect(hwnd, out probe)) break;
             if (GetForegroundWindow() == hwnd)
             {
-                Thread.Sleep(1200); // let the window paint the answer first
+                Thread.Sleep(1200);
                 Apply(taskbar, hwnd, false, out hr);
                 Log("auto-clear (focused) hr=" + hr);
                 return 0;
