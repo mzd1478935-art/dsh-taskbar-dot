@@ -105,7 +105,6 @@ function sendJson(res, code, body) {
 
 export function apply(ctx, rawConfig) {
   const boot = normalize({ ...DEFAULTS, ...(rawConfig && typeof rawConfig === 'object' ? rawConfig : {}) })
-  if (!boot.enabled) return
   if (process.platform !== 'win32') return
 
   let exe = null
@@ -117,13 +116,26 @@ export function apply(ctx, rawConfig) {
   if (!exe) return
 
   try {
-    appendFileSync(join(dataDir(), 'host.log'), `${new Date().toISOString()} apply v0.2.0 pid=${process.pid} size=${boot.size} sound=${boot.sound}\n`)
+    appendFileSync(join(dataDir(), 'host.log'), `${new Date().toISOString()} apply v0.2.1 pid=${process.pid} size=${boot.size} sound=${boot.sound}\n`)
   } catch {
     /* logging is optional */
   }
 
   let child = null
   const lastStatus = new Map()
+  const runningSince = new Map()
+  // 子代理 / 后台运行的 id 是裸 UUID，不是侧栏里的会话；它们的 running->idle
+  // 只是主回合中间的一步，绝不能因此点亮。主会话是 session-<uuid>。
+  const BARE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+  const isChildRun = (id) => BARE_UUID.test(String(id))
+
+  function logLine(message) {
+    try {
+      appendFileSync(join(dataDir(), 'host.log'), `${new Date().toISOString()} ${message}\n`)
+    } catch {
+      /* logging is optional */
+    }
+  }
 
   function spawnHelper(extra) {
     try {
@@ -139,9 +151,13 @@ export function apply(ctx, rawConfig) {
   }
 
   function show() {
-    if (child && child.exitCode === null) return
     const settings = readSettings()
     if (!settings.enabled) return
+    if (child && child.exitCode === null) {
+      // 点已经亮着：这一回合只补一声提示音，不叠新的点/进程
+      if (settings.sound !== 'off') spawnHelper([`soundonly=${settings.sound}`])
+      return
+    }
     const args = [`title=${settings.windowTitle}`, `size=${settings.size}`, `sound=${settings.sound}`]
     child = spawnHelper(args)
   }
@@ -153,7 +169,29 @@ export function apply(ctx, rawConfig) {
     const sid = String(id)
     const prev = lastStatus.get(sid)
     lastStatus.set(sid, next)
-    if (next === 'idle' && prev === 'running') show()
+    if (next === 'running') {
+      if (prev !== 'running') runningSince.set(sid, Date.now())
+      return
+    }
+    if (next !== 'idle' || prev !== 'running') return
+    if (isChildRun(sid)) {
+      logLine(`idle ${sid} child run -> skipped`)
+      return
+    }
+    const agent = payload?.agent || {}
+    if (agent.parentId || agent.origin === 'subagent' || agent.kind === 'subagent') {
+      logLine(`idle ${sid} subagent metadata -> skipped`)
+      return
+    }
+    // 一闪而过的 running（加载/重连留下的瞬时状态）不算一回合
+    const since = runningSince.get(sid) || 0
+    const elapsed = since ? Date.now() - since : 0
+    if (elapsed < 600) {
+      logLine(`idle ${sid} ran ${elapsed}ms -> skipped (too short)`)
+      return
+    }
+    logLine(`idle ${sid} main session (${elapsed}ms) -> show`)
+    show()
   })
 
   // Settings + preview API for the in-app panel.
@@ -176,7 +214,10 @@ export function apply(ctx, rawConfig) {
               }
               if (path === '/settings' && req.method === 'POST') {
                 const body = await readBody(req)
-                return sendJson(res, 200, { ok: true, settings: writeSettings(body) })
+                const saved = writeSettings(body)
+                // 关掉总开关时立刻把已经亮着的点撤掉（否则要等用户切回窗口）
+                if (!saved.enabled) spawnHelper(['clear'])
+                return sendJson(res, 200, { ok: true, settings: saved })
               }
               if (path === '/preview' && req.method === 'POST') {
                 const body = await readBody(req)

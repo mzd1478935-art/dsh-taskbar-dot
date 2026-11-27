@@ -259,7 +259,7 @@ internal static class TaskbarDot
 
         if (!hold && GetForegroundWindow() == hwnd)
         {
-            Thread.Sleep(260); // 让异步提示音播完再退出
+            if (!string.IsNullOrEmpty(SoundPreset) && SoundPreset != "off") Thread.Sleep(260); // 让异步提示音播完再退出
             Log("skip (foreground at completion) size=" + SizeLevel + " sound=" + SoundPreset);
             return 0;
         }
@@ -288,6 +288,9 @@ internal static class TaskbarDot
                 return 0;
             }
         }
+        // 超时（30 分钟没人回来）也要把点撤掉，不能把 overlay 永久留在任务栏上。
+        Apply(taskbar, hwnd, false, out hr);
+        Log("auto-clear (timeout) hr=" + hr);
         return 0;
     }
 }

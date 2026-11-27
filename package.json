@@ -1,6 +1,6 @@
 {
   "name": "dsh-taskbar-dot",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Windows 任务栏完成蓝点：回合跑完在 DSH 图标右上角点一个小蓝点，可调大小、短促提示音、可关闭；系统 overlay 绘制，无常驻进程，0 token。",
   "type": "module",
   "main": "index.js",
